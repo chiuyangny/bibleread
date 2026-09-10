@@ -2485,19 +2485,6 @@ async function handleApiBibleChapter(env, url, cors, translationId, bookNum, cha
   };
 
   // Try KV cache first
-  if (env.COMMENTARY_KV) {
-    const cached = await env.COMMENTARY_KV.get(cacheKey, 'json');
-    if (cached) {
-      return new Response(JSON.stringify({
-        data: sanitizeApiBibleContent(cached.data, translationId, bookNum, chapter),
-        meta: cached.meta || {},
-        fumsToken: null, // never reuse a stored FUMS token; cached reads fire FUMS without one
-        cached: true,
-        translation
-      }), { headers: respHeaders });
-    }
-  }
-
   // TEMPORARY probe, to see what api.bible's other content types carry for a
   // chapter (tables in 1 Chronicles 27, poetry lines) before the fetch below
   // is switched to one of them.  Bypasses the cache, stores nothing, returns
@@ -2515,6 +2502,19 @@ async function handleApiBibleChapter(env, url, cors, translationId, bookNum, cha
     const r = await fetch(`https://rest.api.bible/v1/bibles/${translationId}/chapters/${chapterId}?${pp}`,
       { headers: { 'api-key': env.API_BIBLE_KEY } });
     return new Response(await r.text(), { status: r.status, headers: { ...respHeaders, 'Cache-Control': 'no-store' } });
+  }
+
+  if (env.COMMENTARY_KV) {
+    const cached = await env.COMMENTARY_KV.get(cacheKey, 'json');
+    if (cached) {
+      return new Response(JSON.stringify({
+        data: sanitizeApiBibleContent(cached.data, translationId, bookNum, chapter),
+        meta: cached.meta || {},
+        fumsToken: null, // never reuse a stored FUMS token; cached reads fire FUMS without one
+        cached: true,
+        translation
+      }), { headers: respHeaders });
+    }
   }
 
   // Fetch fresh from api.bible
