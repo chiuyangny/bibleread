@@ -33,8 +33,13 @@
   header{display:flex;align-items:baseline;gap:14px;padding:18px 22px;border-bottom:1px solid var(--line)}
   h1{font-size:17px;margin:0;font-weight:640;letter-spacing:-.01em}
   .stats{font-size:13px;color:var(--dim)}
-  .wrap{display:grid;grid-template-columns:1fr 300px;gap:22px;padding:22px;align-items:start}
-  @media (max-width:900px){ .wrap{grid-template-columns:1fr} }
+  .wrap{padding:22px}
+  /* Two tabs, one thing on screen at a time:  the board for picking, or the
+     three things worth reviewing (today, tomorrow, the queue).  Side by side
+     the review column was 300px and its tiles too small to judge a photo. */
+  .tabs{display:flex;gap:6px;padding:10px 22px 0}
+  .tabs button{border-radius:999px;padding:7px 14px}
+  .tabs button.on{background:var(--accent);color:var(--bg);border-color:var(--accent)}
 
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
   /* THE SHAPE THE APP ACTUALLY SHOWS.
@@ -116,22 +121,10 @@
   /* The tile's buttons run full width;  its chips must not. */
   .live .fx button{width:auto}
 
-  aside{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
-  /* Sticky ONLY in the two-column layout, and never taller than the viewport.
-   *
-   * A sticky panel taller than the screen pins its top and leaves its bottom
-   * permanently off-screen:  scrolling slides the page underneath it instead
-   * of revealing the rest, so with ten queued photos the bottom of the queue
-   * simply cannot be reached.  On iOS that shows up as the page appearing to
-   * end partway down with dead background below it.
-   *
-   * Capping the height and letting the panel scroll inside itself fixes that
-   * where sticky is wanted.  Below 900px the panel is stacked beneath the
-   * grid rather than beside it, so there is nothing to stay level with and
-   * sticky buys nothing — it only reintroduces the trap. */
-  @media (min-width:901px){
-    aside{position:sticky;top:22px;max-height:calc(100vh - 44px);overflow:auto}
-  }
+  /* The review tab is a single column, wide enough to judge a photo on a
+     desktop but not a full-width banner. */
+  aside{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;
+        max-width:560px;margin:0 auto}
   aside h2{font-size:13px;margin:0 0 10px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
   .q{display:flex;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line);
      cursor:grab;background:var(--panel)}
@@ -217,9 +210,13 @@
 <div class="report" id="report" hidden></div>
 <div id="boot" class="msg">Loading…</div>
 <div id="lb"><button class="x" type="button" aria-label="Close">✕</button><img alt=""><div class="cap"></div></div>
+<nav class="tabs" id="tabs" hidden>
+  <button type="button" data-tab="pick">Pick photos</button>
+  <button type="button" data-tab="review">Today · Tomorrow · Queue <span id="qtab"></span></button>
+</nav>
 <div class="wrap" id="wrap" hidden>
-  <main><div class="grid" id="grid"></div></main>
-  <aside>
+  <main id="tab-pick"><div class="grid" id="grid"></div></main>
+  <aside id="tab-review">
     <!-- The photo readers are looking at RIGHT NOW, and the button to replace
          it.  The queue below decides FUTURE days;  until this existed there
          was no way to change the one already on screen, which is the only one
@@ -374,6 +371,19 @@ function filterRow(active, onPick){
   return row;
 }
 
+/* Which tab is open, remembered on this device.  "pick" is the board;
+ * "review" is today, tomorrow and the queue. */
+const TAB_KEY = 'krengbible_votd_tab';
+function showTab(name){
+  if(name !== 'review') name = 'pick';
+  document.getElementById('tab-pick').hidden = name !== 'pick';
+  document.getElementById('tab-review').hidden = name !== 'review';
+  for(const b of document.querySelectorAll('#tabs button')) b.classList.toggle('on', b.dataset.tab === name);
+  localStorage.setItem(TAB_KEY, name);
+  window.scrollTo(0, 0);
+}
+for(const b of document.querySelectorAll('#tabs button')) b.addEventListener('click', () => showTab(b.dataset.tab));
+
 /* Overlay on or off, remembered on this device.  On by default: the bare
  * photo is the less useful view, and it is one click away. */
 const OV_KEY = 'krengbible_votd_overlay';
@@ -396,6 +406,8 @@ const big = (u, w) => String(u).replace(/&w=\d+/, '&w=' + w);
 function render(b){
   document.getElementById('boot').hidden = true;
   document.getElementById('wrap').hidden = false;
+  document.getElementById('tabs').hidden = false;
+  showTab(localStorage.getItem(TAB_KEY) || 'pick');
   document.getElementById('stats').textContent =
     b.candidates.length + ' shown · ' + b.queue.length + ' queued · ' +
     b.usedCount + ' used · ' + b.rejectedCount + ' blocked';
@@ -444,6 +456,7 @@ function render(b){
 
   const q = document.getElementById('queue');
   document.getElementById('qn').textContent = b.queue.length;
+  document.getElementById('qtab').textContent = '(' + b.queue.length + ')';
   q.innerHTML = '';
   if(!b.queue.length){ q.innerHTML = '<div class="empty">Empty — the next staging at 08:00 UTC will auto-roll.</div>'; return; }
   order = b.queue.map(x => x.slug);
