@@ -3944,6 +3944,61 @@ async function votdSendChooserEmail(dateET, staged, env) {
   }).catch(() => {});
 }
 
+// ---- App failure reports, by mail ----
+const REPORT_HOURLY_MAX = 30;
+const REPORT_MAX_BYTES = 4096;
+
+async function handleClientReport(request, env, cors) {
+  const json = (obj, status = 200) => new Response(JSON.stringify(obj), {
+    status, headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
+  });
+  const raw = await request.text();
+  if (raw.length > REPORT_MAX_BYTES) return json({ error: 'too_large' }, 413);
+  let body;
+  try { body = JSON.parse(raw); } catch { return json({ error: 'bad_json' }, 400); }
+  if (!body || typeof body !== 'object' || typeof body.kind !== 'string') return json({ error: 'bad_report' }, 400);
+  const str = (v, max = 200) => (typeof v === 'string' ? v.slice(0, max) : '');
+  const report = {
+    kind: str(body.kind, 40),
+    step: str(body.step, 40),
+    code: str(body.code, 60),
+    message: str(body.message, 300),
+    gid: str(body.gid, 40),
+    build: str(body.build, 120),
+    at: str(body.at, 40) || new Date().toISOString(),
+  };
+  if (!env.COMMENTARY_KV) return json({ ok: true, sent: false });
+
+  const hour = new Date().toISOString().slice(0, 13);
+  const countKey = `report_count_${hour}`;
+  const count = parseInt((await env.COMMENTARY_KV.get(countKey)) || '0', 10);
+  await env.COMMENTARY_KV.put(countKey, String(count + 1), { expirationTtl: 7200 });
+  if (count >= REPORT_HOURLY_MAX) return json({ ok: true, sent: false, reason: 'hourly_cap' });
+
+  // One mail per distinct failure per hour.  The same step and code from
+  // the same group is one incident however many times it is retried.
+  const fp = `report_seen_${hour}_${report.kind}_${report.step}_${report.code}_${report.gid}`.replace(/[^\w.-]/g, '_').slice(0, 200);
+  if (await env.COMMENTARY_KV.get(fp)) return json({ ok: true, sent: false, reason: 'duplicate' });
+  await env.COMMENTARY_KV.put(fp, '1', { expirationTtl: 3600 });
+
+  if (!env.RESEND_KEY || !env.VOTD_EMAIL_TO || !env.VOTD_EMAIL_FROM) return json({ ok: true, sent: false, reason: 'mail_unset' });
+  const esc = (v) => String(v ?? '').replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+  const rows = Object.entries(report).map(([k, v]) =>
+    `<tr><td style="padding:3px 12px 3px 0;color:#666">${esc(k)}</td><td style="padding:3px 0">${esc(v) || '—'}</td></tr>`).join('');
+  await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${env.RESEND_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      from: env.VOTD_EMAIL_FROM, to: [env.VOTD_EMAIL_TO],
+      subject: `krengbible app: ${report.kind} failed at ${report.step || '?'} (${report.code || 'unknown'})`,
+      html: `<div style="font-family:-apple-system,Segoe UI,sans-serif;font-size:14px;color:#111">` +
+        `<p style="margin:0 0 10px">A reader's <b>${esc(report.kind)}</b> failed.  Mailed once per distinct failure per hour;  further repeats are counted only.</p>` +
+        `<table style="border-collapse:collapse">${rows}</table></div>`
+    })
+  }).catch(() => {});
+  return json({ ok: true, sent: true });
+}
+
 /**
  * Nudge when the queue is nearly dry.  Sent AFTER staging, so the count is
  * what remains for the days beyond tomorrow — at 1 there is a day of slack,
@@ -4162,7 +4217,7 @@ export default {
   async fetch(request, env) {
     const cors = {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       // The VOTD picker page on krengbible.com sends the admin secret as a
       // request header rather than a query param, so it never lands in a URL
       // or an access log.  A custom header makes the request preflighted,
@@ -4548,6 +4603,23 @@ Only output valid JSON, no markdown, no preamble.`;
     if (path === '/admin/wipe-apibible-cache') return handleWipeApiBibleCache(env, url, cors);
     if (path === '/admin/build-apibible-index') return handleBuildApiBibleIndex(env, url, cors);
     if (path === '/admin/merge-apibible-index') return handleMergeApiBibleIndex(env, url, cors);
+
+    // ---- POST /report — an app-side failure, mailed to the owner ----
+    //
+    // The app used to fold every failure after "invite code not found" into
+    // one sentence and log nothing, so a friend's failed join was a guess
+    // between a network blip, a stale token and a rule.  The app now posts
+    // what failed and at which step;  this mails it, so it arrives without
+    // anyone opening a console.
+    //
+    // Public endpoint that sends mail, so it is bounded: 4 KB body, at most
+    // REPORT_HOURLY_MAX mails an hour across all senders, and one mail per
+    // distinct failure per hour (the rest are counted, not sent).  Nothing
+    // identifying is expected in the body and nothing is added:  the app
+    // sends the failure, the step, the group id, and its own build.
+    if (path === '/report' && request.method === 'POST') {
+      return handleClientReport(request, env, cors);
+    }
 
     // ---- api.bible chapter fetch (NLT / NIV / MSG) ----
     //   /apibible/{translationId}/{bookNum}/{chapter}
