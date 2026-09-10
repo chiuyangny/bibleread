@@ -113,6 +113,8 @@
   .fx button{font-size:11px;padding:3px 9px;border-radius:999px;line-height:1.3}
   .fx button.on{background:var(--accent);color:var(--bg);border-color:var(--accent)}
   .live .fx{padding:0 0 10px}
+  /* The tile's buttons run full width;  its chips must not. */
+  .live .fx button{width:auto}
 
   aside{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
   /* Sticky ONLY in the two-column layout, and never taller than the viewport.
@@ -615,7 +617,9 @@ async function renderLive(){
     ? (photo.credit || 'Unknown') + ' · this device is being served ' + date
     : 'No photo stored for ' + date + ' — readers see a tinted card.';
   el.appendChild(cap);
-  if(photo && photo.url) el.appendChild(filterRow(photo.filter, (name) => refilter(el, date, name, renderLive)));
+  // No filter chips here:  phones store today's photo at first open and
+  // the edge caches /votd until midnight, so a change now reaches almost
+  // nobody.  Tomorrow's tile is where a filter belongs.
 
   const btn = document.createElement('button');
   btn.className = 'add';
