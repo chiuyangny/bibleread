@@ -2372,6 +2372,37 @@ function stripKlbHeadings(content, bookNum, chapter) {
 
 const API_BIBLE_REGEX_ARTIFACT = /\s*\(\?[=!:<][^)]{0,60}\)/g;
 
+// ---- Psalm 119: the acrostic letters ----
+//
+// Psalm 119 is twenty-two stanzas of eight verses, each headed by a Hebrew
+// letter.  api.bible sends the letter's name as a line of its own between
+// the stanzas ("    Mem\n   [97] ..."; NIV also prints the letter, "מ Mem"),
+// and a parser that splits on [N] markers glues that line onto the END of
+// verse 96.  The reader then showed "...have no limit. Mem" as scripture.
+//
+// The line is lifted out here and handed back as a heading anchored to the
+// verse that follows it, so the app renders it the way it renders every other
+// section title.  On the way OUT, like the KLB fix above, so the 30-day cache
+// repairs itself on the next read.  Psalm 119 only: no other chapter carries
+// these lines in any api.bible text we serve.
+// "Sin and Shin" is NIV's label for the twenty-first stanza;  it must sit
+// before the bare "Shin" or the alternation stops short at "Sin".
+const ACROSTIC_LETTERS_EN = 'Aleph|Beth|Gimel|Daleth|He|Waw|Zayin|Heth|Teth|Yodh|Kaph|Lamedh|Mem|Nun|Samekh|Ayin|Pe|Tsadhe|Qoph|Resh|Sin and Shin|Shin|Taw';
+const ACROSTIC_LINE = new RegExp(
+  '(^|\\n)[ \\t]*(?:[\\u0590-\\u05FF]+[ \\t]+)?(' + ACROSTIC_LETTERS_EN + ')[ \\t]*(?=\\n[ \\t]*\\[(\\d+)\\])',
+  'g',
+);
+
+/** Lift Psalm 119's stanza letters out of the text and into headings. */
+function liftAcrosticHeadings(content) {
+  const headings = [];
+  const cleaned = content.replace(ACROSTIC_LINE, (_m, lead, name, verse) => {
+    headings.push({ verse: Number(verse), title: name });
+    return lead;
+  });
+  return { cleaned, headings };
+}
+
 function sanitizeApiBibleContent(data, translationId, bookNum, chapter) {
   if (!data || typeof data.content !== 'string') return data;
   let cleaned = data.content.replace(API_BIBLE_REGEX_ARTIFACT, '');
@@ -2380,7 +2411,38 @@ function sanitizeApiBibleContent(data, translationId, bookNum, chapter) {
   if (translationId === KLB_TRANSLATION_ID) {
     cleaned = stripKlbHeadings(cleaned, bookNum, chapter);
   }
-  return cleaned === data.content ? data : { ...data, content: cleaned };
+  let headings = null;
+  if (bookNum === 19 && chapter === 119) {
+    const lifted = liftAcrosticHeadings(cleaned);
+    if (lifted.headings.length) {
+      cleaned = lifted.cleaned;
+      headings = lifted.headings;
+    }
+  }
+  if (cleaned === data.content && !headings) return data;
+  return headings ? { ...data, content: cleaned, headings } : { ...data, content: cleaned };
+}
+
+// The same letters as 우리말성경 spells them, in stanza order.  The import
+// glued each stanza's letter onto the END of the verse before it (verse 8
+// ends "...마소서. 베트"), and dropped the first one entirely.
+const ACROSTIC_LETTERS_KO = ['알레프','베트','김멜','달렛','헤','바브','자인','헤트','테트','요드','카프','라메드','멤','눈','사멕','아인','페','짜데','코프','레쉬','쉰','타브'];
+
+/** Psalm 119 in 우리말성경: move the stanza letters off the verse ends and
+ *  into headings.  Applied on the way out;  the stored chapter is untouched. */
+function liftWooriAcrostic(data) {
+  if (!data || !Array.isArray(data.verses)) return data;
+  const headings = [{ verse: 1, title: ACROSTIC_LETTERS_KO[0] }];
+  const known = new Set(ACROSTIC_LETTERS_KO);
+  const verses = data.verses.map((v) => {
+    const n = typeof v.verse === 'string' ? parseInt(v.verse, 10) : v.verse;
+    if (!(n % 8 === 0 && n < 176) || typeof v.text !== 'string') return v;
+    const m = /^([\s\S]*\S)\s+(\S+)$/.exec(v.text);
+    if (!m || !known.has(m[2])) return v;
+    headings.push({ verse: n + 1, title: m[2] });
+    return { ...v, text: m[1] };
+  });
+  return { ...data, verses, headings: [...(data.headings || []), ...headings] };
 }
 
 async function handleApiBibleChapter(env, url, cors, translationId, bookNum, chapter) {
@@ -5113,7 +5175,8 @@ Only output valid JSON, no markdown, no preamble.`;
           headers: { ...cors, 'Content-Type': 'application/json' },
         });
       }
-      return new Response(JSON.stringify(result.data), {
+      const data = bookNum === 19 && chapter === 119 ? liftWooriAcrostic(result.data) : result.data;
+      return new Response(JSON.stringify(data), {
         headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=2592000, stale-while-revalidate=86400' },
       });
     }
