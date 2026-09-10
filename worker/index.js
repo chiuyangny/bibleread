@@ -2498,6 +2498,25 @@ async function handleApiBibleChapter(env, url, cors, translationId, bookNum, cha
     }
   }
 
+  // TEMPORARY probe, to see what api.bible's other content types carry for a
+  // chapter (tables in 1 Chronicles 27, poetry lines) before the fetch below
+  // is switched to one of them.  Bypasses the cache, stores nothing, returns
+  // the raw payload.  Removed once the HTML path is built.
+  const probe = url.searchParams.get('probe');
+  if (probe === 'html' || probe === 'json') {
+    const pp = new URLSearchParams({
+      'content-type': probe,
+      'include-notes': 'false',
+      'include-titles': 'false',
+      'include-chapter-numbers': 'false',
+      'include-verse-numbers': 'true',
+      'include-verse-spans': 'false'
+    });
+    const r = await fetch(`https://rest.api.bible/v1/bibles/${translationId}/chapters/${chapterId}?${pp}`,
+      { headers: { 'api-key': env.API_BIBLE_KEY } });
+    return new Response(await r.text(), { status: r.status, headers: { ...respHeaders, 'Cache-Control': 'no-store' } });
+  }
+
   // Fetch fresh from api.bible
   // Query params per api.bible /v1/bibles/{id}/chapters/{chapterId} spec.
   // NOTE: do NOT include `use-org-id` here — that param belongs to the verses
