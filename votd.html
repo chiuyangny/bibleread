@@ -688,12 +688,12 @@ async function renderNext(){
   await undoButton(el, date, [renderNext]);
 }
 
-/* "Undo", shown only when the worker holds a state to go back to for this
- * date — the record before the last re-roll or filter change.  One step:
- * pressing it clears what it restored from, so it never offers a second
- * undo that would mean something else.  A re-rolled photo that came from
- * the queue goes back to the head of the queue, which is why the board is
- * re-read afterwards. */
+/* "Undo", shown only when the worker holds a photo to go back to for this
+ * date — the one staged before the last re-roll.  Filter changes do not
+ * count;  the chips reverse those.  One step:  pressing it clears what it
+ * restored from, so it never offers a second undo that would mean
+ * something else.  A re-rolled photo that came from the queue goes back to
+ * the head of the queue, which is why the board is re-read afterwards. */
 async function undoButton(el, date, after){
   let peek = null;
   try{ peek = await call('/admin/votd-undo?date=' + encodeURIComponent(date) + '&peek=1'); }

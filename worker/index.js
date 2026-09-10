@@ -4135,11 +4135,15 @@ function votdWithFilter(rec, name) {
  * its place when that matters for putting things back:  a re-roll takes the
  * head of the queue and logs the new photo as used, and undoing it has to
  * return the photo to the queue and strike the log entry, or an approved
- * photo is silently spent by a mis-tap.  A filter change moves nothing, so
- * it records no displacement.
+ * photo is silently spent by a mis-tap.
  *
- * One level, not a history:  `votdprev` is the state before the LATEST
- * change and undo clears it, so the page can offer exactly one honest
+ * Only a change of PHOTO sets the undo point.  A filter change leaves it
+ * alone:  filters are reversed with the chips, and if they counted, a
+ * re-roll followed by a filter would "undo" to the same wrong photo with
+ * its old filter, which is not what anyone pressing Undo wants.
+ *
+ * One level, not a history:  `votdprev` is the state before the latest
+ * photo change and undo clears it, so the page can offer exactly one honest
  * "Undo" and never a stack whose middle steps no longer make sense.
  */
 async function votdRememberPrev(env, dateET, photo, displaced) {
@@ -5190,7 +5194,10 @@ Only output valid JSON, no markdown, no preamble.`;
       let photo = null;
       try { photo = JSON.parse(raw); } catch { photo = null; }
       if (!photo || !photo.url) return json({ error: 'nothing staged' }, 404);
-      await votdRememberPrev(env, date, photo, null);
+      // No undo point:  a filter is undone with the chips themselves, and
+      // recording it here would make "Undo" after a re-roll-then-filter
+      // revert only the filter, when what the person wants back is the
+      // photo.  See votdRememberPrev.
       photo = votdWithFilter(photo, name);
       await env.COMMENTARY_KV.put(`votdphoto2_${date}`, JSON.stringify(photo), { expirationTtl: votdKeyTtl(date) });
       return json({ date, photo });
@@ -5247,7 +5254,9 @@ Only output valid JSON, no markdown, no preamble.`;
         if (d.fromQueue && d.entry && d.entry.url) {
           const queue = await votdReadJson(env, 'votd_queue', []);
           if (!queue.some((q) => q && q.slug === d.slug)) {
-            queue.unshift(d.entry);
+            // With the filter it wears NOW, not the one it was queued with:
+            // a filter chosen after staging is a decision worth keeping.
+            queue.unshift(votdWithFilter(d.entry, (current && current.filter) || d.entry.filter || 'original'));
             await votdWriteJson(env, 'votd_queue', queue);
           }
         }
