@@ -149,6 +149,7 @@
             background:var(--line);cursor:zoom-in}
   .live .cap{font-size:12px;color:var(--dim);margin:8px 0 10px;line-height:1.4}
   .live button{width:100%}
+  .live button.undo{margin-top:6px;color:var(--dim)}
   aside h2 + h2, .live + h2{margin-top:18px}
   /* Why the board is short.  The worker has always returned `short`
      and `error` for exactly this, but the page used to drop them, so a
@@ -621,6 +622,7 @@ async function renderLive(){
   btn.textContent = photo ? 'Change this photo' : 'Roll a photo';
   btn.onclick = () => reroll(btn, date);
   el.appendChild(btn);
+  await undoButton(el, date, [renderLive]);
 }
 
 /**
@@ -678,6 +680,39 @@ async function renderNext(){
   btn.className = 'add';
   btn.textContent = staged ? 'Change tomorrow\'s photo' : 'Stage now from the queue';
   btn.onclick = () => reroll(btn, date, [renderNext]);
+  el.appendChild(btn);
+  await undoButton(el, date, [renderNext]);
+}
+
+/* "Undo", shown only when the worker holds a state to go back to for this
+ * date — the record before the last re-roll or filter change.  One step:
+ * pressing it clears what it restored from, so it never offers a second
+ * undo that would mean something else.  A re-rolled photo that came from
+ * the queue goes back to the head of the queue, which is why the board is
+ * re-read afterwards. */
+async function undoButton(el, date, after){
+  let peek = null;
+  try{ peek = await call('/admin/votd-undo?date=' + encodeURIComponent(date) + '&peek=1'); }
+  catch(e){ return; }
+  if(!peek || !peek.has) return;
+  const btn = document.createElement('button');
+  btn.className = 'undo';
+  btn.textContent = peek.photo
+    ? 'Undo · back to ' + (peek.photo.credit || 'the previous photo') + (peek.photo.filter && peek.photo.filter !== 'original' ? ' (' + peek.photo.filter + ')' : '')
+    : 'Undo · un-stage this date';
+  btn.onclick = async () => {
+    btn.disabled = true;
+    btn.textContent = 'Undoing…';
+    try{
+      await call('/admin/votd-undo?date=' + encodeURIComponent(date));
+      await Promise.all(after.map((f) => f()));
+      render(await call('/admin/votd-board'));
+    }catch(e){
+      btn.disabled = false;
+      btn.textContent = 'Undo';
+      alert(e.message);
+    }
+  };
   el.appendChild(btn);
 }
 

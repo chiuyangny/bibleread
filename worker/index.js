@@ -4128,6 +4128,36 @@ function votdWithFilter(rec, name) {
 }
 
 /**
+ * One step of undo for a date's staged photo.
+ *
+ * Every admin route that overwrites `votdphoto2_<date>` first copies what
+ * is there into `votdprev_<date>`, together with what the overwrite put in
+ * its place when that matters for putting things back:  a re-roll takes the
+ * head of the queue and logs the new photo as used, and undoing it has to
+ * return the photo to the queue and strike the log entry, or an approved
+ * photo is silently spent by a mis-tap.  A filter change moves nothing, so
+ * it records no displacement.
+ *
+ * One level, not a history:  `votdprev` is the state before the LATEST
+ * change and undo clears it, so the page can offer exactly one honest
+ * "Undo" and never a stack whose middle steps no longer make sense.
+ */
+async function votdRememberPrev(env, dateET, photo, displaced) {
+  if (!env.COMMENTARY_KV) return;
+  await env.COMMENTARY_KV.put(
+    `votdprev_${dateET}`,
+    JSON.stringify({ photo: photo || null, displaced: displaced || null, at: new Date().toISOString() }),
+    { expirationTtl: votdKeyTtl(dateET) }
+  );
+}
+
+async function votdReadStaged(env, dateET) {
+  const raw = env.COMMENTARY_KV ? await env.COMMENTARY_KV.get(`votdphoto2_${dateET}`) : null;
+  if (!raw) return null;
+  try { const p = JSON.parse(raw); return p && p.url ? p : null; } catch { return null; }
+}
+
+/**
  * Choose and store the photo for an ET date.  Writing `votdphoto2_<date>`
  * ahead of time is the whole mechanism: when that date arrives, /votd sees a
  * non-null key, `needPhoto` is false, and it serves this photo instead of
@@ -5160,9 +5190,69 @@ Only output valid JSON, no markdown, no preamble.`;
       let photo = null;
       try { photo = JSON.parse(raw); } catch { photo = null; }
       if (!photo || !photo.url) return json({ error: 'nothing staged' }, 404);
+      await votdRememberPrev(env, date, photo, null);
       photo = votdWithFilter(photo, name);
       await env.COMMENTARY_KV.put(`votdphoto2_${date}`, JSON.stringify(photo), { expirationTtl: votdKeyTtl(date) });
       return json({ date, photo });
+    }
+
+    // ---- /admin/votd-undo — reverse the last change to a date's photo ----
+    // ?date=YYYY-MM-DD (default: tomorrow).  ?peek=1 only reports whether
+    // there is anything to undo, and what it would restore, so the picker can
+    // show the button only when it means something.
+    //
+    // Restores the record that was there before the latest re-roll or filter
+    // change (or removes the record, when there was none).  A re-rolled photo
+    // that came from the queue goes back to its head, and its used-log entry
+    // is struck so it is suggestible again.  One level:  see votdRememberPrev.
+    if (path === '/admin/votd-undo') {
+      const secret = request.headers.get('X-Admin-Secret') || url.searchParams.get('secret');
+      const json = (obj, status = 200) => new Response(JSON.stringify(obj), {
+        status, headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
+      });
+      if (!env.ADMIN_SECRET || secret !== env.ADMIN_SECRET) return json({ error: 'forbidden' }, 403);
+      const date = url.searchParams.get('date') || votdDateET(1);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return json({ error: 'bad date' }, 400);
+      if (date < votdDateET(-2)) return json({ error: 'date already past' }, 400);
+      if (!env.COMMENTARY_KV) return json({ error: 'kv_unset' }, 503);
+      const raw = await env.COMMENTARY_KV.get(`votdprev_${date}`);
+      let prev = null;
+      try { prev = raw ? JSON.parse(raw) : null; } catch { prev = null; }
+      if (!prev) return json(url.searchParams.get('peek') ? { date, has: false } : { error: 'nothing to undo' }, url.searchParams.get('peek') ? 200 : 404);
+      if (url.searchParams.get('peek')) return json({ date, has: true, photo: prev.photo || null, at: prev.at || null });
+
+      const current = await votdReadStaged(env, date);
+      if (prev.photo && prev.photo.url) {
+        await env.COMMENTARY_KV.put(`votdphoto2_${date}`, JSON.stringify(prev.photo), { expirationTtl: votdKeyTtl(date) });
+      } else {
+        await env.COMMENTARY_KV.delete(`votdphoto2_${date}`);
+      }
+      await env.COMMENTARY_KV.delete(`votdprev_${date}`);
+
+      // Put the displaced photo back where the re-roll took it from.  Only
+      // when it is still what is staged:  if something else has been written
+      // since (the cron, a hand edit), the displaced photo is not what we are
+      // removing, and touching the queue or the log would be a guess.
+      const d = prev.displaced;
+      const curSlug = current ? (current.slug || votdSlug(current.url)) : null;
+      if (d && d.slug && curSlug === d.slug) {
+        const used = await votdReadJson(env, 'votd_used', {});
+        const entry = used[d.slug];
+        if (entry) {
+          const dates = (Array.isArray(entry.dates) ? entry.dates : (entry.date ? [entry.date] : [])).filter((x) => x !== date);
+          if (dates.length) used[d.slug] = { ...entry, dates, date: dates[dates.length - 1] };
+          else delete used[d.slug];
+          await votdWriteJson(env, 'votd_used', used);
+        }
+        if (d.fromQueue && d.entry && d.entry.url) {
+          const queue = await votdReadJson(env, 'votd_queue', []);
+          if (!queue.some((q) => q && q.slug === d.slug)) {
+            queue.unshift(d.entry);
+            await votdWriteJson(env, 'votd_queue', queue);
+          }
+        }
+      }
+      return json({ date, restored: prev.photo || null, requeued: !!(d && d.fromQueue && curSlug === d.slug) });
     }
 
     // ---- /admin/votd-next — re-roll the staged photo for a date ----
@@ -5191,7 +5281,19 @@ Only output valid JSON, no markdown, no preamble.`;
           status: 400, headers: { ...cors, 'Content-Type': 'application/json' }
         });
       }
+      // What is there now and what the queue would give, read BEFORE staging
+      // so that undo can put both back — see votdRememberPrev.
+      const before = await votdReadStaged(env, date);
+      const head = (await votdReadQueue(env))[0] || null;
       const photo = await votdStagePhoto(date, env);
+      if (photo) {
+        const fromQueue = !!(head && head.slug && head.slug === (photo.slug || votdSlug(photo.url)));
+        await votdRememberPrev(env, date, before, {
+          slug: photo.slug || votdSlug(photo.url),
+          fromQueue,
+          entry: fromQueue ? head : null,
+        });
+      }
       // staged reflects whether anything was actually written — see
       // votdStagePhoto for why a failed roll writes nothing at all.
       return new Response(JSON.stringify({ date, staged: !!photo, photo }), {
