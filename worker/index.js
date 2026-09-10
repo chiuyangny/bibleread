@@ -3598,7 +3598,9 @@ async function votdAttachTexts(verses, env) {
       const v = (JSON.parse(enRaw) || []).find((x) => covers(x.verse));
       if (v && v.text) en = v.text;
     }
-    if (ko || en) verses[0] = { ...first, ko, en };
+    // The Korean book name rides along, so a client can write 요한복음 3:16
+    // without carrying its own table of sixty-six names.
+    if (ko || en) verses[0] = { ...first, ko, en, bookKo: BOOK_NAMES_KO[bookIdx] };
   } catch {
     // Best-effort: the payload is complete without it.
   }

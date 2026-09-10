@@ -286,20 +286,43 @@ const SAMPLE = {
   cta: '요한복음 3장 읽기  →',
 };
 
-/* A photo with the sample verse laid over it, the way the app lays it.
- * Everything the app puts on the card is here in the app's order: label,
- * Korean, divider, English (secondary size), button. */
-function photoTile(src, alt){
-  return '<div class="ph"><img loading="lazy" src="' + src + '" alt="' + (alt || '') + '">' +
+/* A photo with a verse laid over it, the way the app lays it.  Everything
+ * the app puts on the card is here in the app's order: label, Korean,
+ * divider, English (secondary size), button.
+ *
+ * The grid uses SAMPLE, so its tiles compare like for like.  The two live
+ * tiles pass the day's REAL verse (see verseFor), so "on screen now" is what
+ * readers are looking at and "tomorrow" is what they will be. */
+function photoTile(src, verse){
+  const v = verse || SAMPLE;
+  return '<div class="ph"><img loading="lazy" src="' + src + '" alt="">' +
     '<div class="ov">' +
-      '<div class="lab">' + SAMPLE.label + '</div>' +
-      '<div class="ref">' + SAMPLE.koRef + '</div>' +
-      '<div class="txt">' + SAMPLE.ko + '</div>' +
+      '<div class="lab">' + esc(v.label) + '</div>' +
+      '<div class="ref">' + esc(v.koRef) + '</div>' +
+      '<div class="txt">' + esc(v.ko) + '</div>' +
       '<div class="div"></div>' +
-      '<div class="ref">' + SAMPLE.enRef + '</div>' +
-      '<div class="txt sec">' + SAMPLE.en + '</div>' +
-      '<div class="btn">' + SAMPLE.cta + '</div>' +
+      '<div class="ref">' + esc(v.enRef) + '</div>' +
+      '<div class="txt sec">' + esc(v.en) + '</div>' +
+      '<div class="btn">' + esc(v.cta) + '</div>' +
     '</div></div>';
+}
+
+/* The overlay text for a real day, from a /votd payload.  The worker sends
+ * the verse's 개역개정 and ESV text and the Korean book name with the first
+ * verse;  an older payload without them falls back to the sample so the
+ * tile still shows the card's shape. */
+function verseFor(body){
+  const v = body && body.verses && body.verses[0];
+  if(!v || !(v.ko || v.en)) return null;
+  const bookKo = v.bookKo || v.bookname;
+  return {
+    label: SAMPLE.label,
+    koRef: bookKo + ' ' + v.chapter + ':' + v.verse,
+    ko: v.ko || '',
+    enRef: v.bookname + ' ' + v.chapter + ':' + v.verse,
+    en: v.en || '',
+    cta: bookKo + ' ' + v.chapter + '장 읽기  →',
+  };
 }
 
 /* Overlay on or off, remembered on this device.  On by default: the bare
@@ -507,7 +530,7 @@ async function renderLive(){
   // two can differ — see the comment above localDayIso.
   const asked = localDayIso();
   const el = document.getElementById('live');
-  let photo = null, date = asked;
+  let photo = null, date = asked, verse = null;
   try{
     const r = await fetch(
       WORKER + '/votd?date=' + encodeURIComponent(asked) + '&_=' + Date.now(),
@@ -516,6 +539,7 @@ async function renderLive(){
     if(r.ok){
       const body = await r.json();
       photo = body.photo;
+      verse = verseFor(body);
       // Older workers do not send it;  falling back to what we asked for is
       // what this page did before, so an un-deployed worker is no worse.
       if(body.date) date = body.date;
@@ -524,7 +548,7 @@ async function renderLive(){
 
   el.textContent = '';
   if(photo && photo.url){
-    el.insertAdjacentHTML('beforeend', photoTile(big(photo.url, 640)));
+    el.insertAdjacentHTML('beforeend', photoTile(big(photo.url, 640), verse));
     el.querySelector('img').onclick = () => lightbox(photo);
   }
   const cap = document.createElement('p');
@@ -554,12 +578,23 @@ async function renderLive(){
  */
 async function renderNext(){
   const el = document.getElementById('next');
-  let photo = null, date = null, staged = false;
+  let photo = null, date = null, staged = false, verse = null;
   try{
     const r = await fetch(WORKER + '/votd/next?_=' + Date.now(), { cache: 'no-store' });
     if(r.ok){
       const body = await r.json();
       photo = body.photo; date = body.date; staged = !!body.staged;
+    }
+    // Tomorrow's VERSE, by the date /votd/next names.  Written at 09:00 UTC;
+    // before that the worker answers for today instead, which the echoed
+    // date reveals, and the tile keeps the sample rather than showing
+    // today's verse as tomorrow's.
+    if(date){
+      const rv = await fetch(WORKER + '/votd?date=' + encodeURIComponent(date) + '&_=' + Date.now(), { cache: 'no-store' });
+      if(rv.ok){
+        const vb = await rv.json();
+        if(vb.date === date) verse = verseFor(vb);
+      }
     }
   }catch(e){ /* falls through to the not-staged caption below */ }
 
@@ -569,7 +604,7 @@ async function renderNext(){
     return;
   }
   if(photo && photo.url){
-    el.insertAdjacentHTML('beforeend', photoTile(big(photo.url, 640)));
+    el.insertAdjacentHTML('beforeend', photoTile(big(photo.url, 640), verse));
     el.querySelector('img').onclick = () => lightbox(photo);
   }
   const cap = document.createElement('p');
