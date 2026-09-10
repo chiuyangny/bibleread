@@ -2372,6 +2372,68 @@ function stripKlbHeadings(content, bookNum, chapter) {
 
 const API_BIBLE_REGEX_ARTIFACT = /\s*\(\?[=!:<][^)]{0,60}\)/g;
 
+// ---- api.bible HTML -> the [N]-marked text the clients parse ----
+//
+// What api.bible's HTML carries, from the chapters it was checked against:
+//   <span data-number="16" ... class="v">16</span>   a verse marker, inline
+//   <p class="p|m|li1|...">                          prose paragraphs
+//   <p class="q1|q2|...">                             one poetry LINE each
+//   <p class="qa">Mem</p>                             an acrostic heading
+//   <p class="b"></p>                                 a blank line
+//   <table><row class="tr"><cell class="tc1">        a table (1 Chr 27:16-22)
+//   <span class="nd">Lord</span>                      small caps, plain here
+//
+// Every paragraph ends a line, so poetry keeps its lines and prose verses are
+// unchanged.  A table becomes one line per row with the cells separated by
+// a dash, which is as much of a table as verse text can hold and reads as
+// the two columns it was.  Section-heading paragraphs are dropped: the
+// request excludes titles, but 현대인의 성경 ignores that and sends them,
+// which is the same defect stripKlbHeadings guesses at from the text side.
+const API_BIBLE_HEADING_CLASS = /^(s\d?|ms\d?|mr|sr|r|sp|iex)$/;
+const API_BIBLE_ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+function apiBibleDecode(text) {
+  return text.replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (m, e) => {
+    if (e[0] === '#') {
+      const code = e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : m;
+    }
+    return API_BIBLE_ENTITIES[e.toLowerCase()] ?? m;
+  });
+}
+function apiBibleStripTags(text) {
+  return text.replace(/<[^>]+>/g, '');
+}
+function apiBibleHtmlToText(html) {
+  let s = html;
+  // Verse markers first, so one inside a table cell survives the table pass.
+  s = s.replace(/<span[^>]*\bdata-number="(\d+)"[^>]*>[^<]*<\/span>/g, '[$1] ');
+  s = s.replace(/<table[^>]*>([\s\S]*?)<\/table>/g, (_m, body) => {
+    const rows = [];
+    for (const r of body.matchAll(/<row[^>]*>([\s\S]*?)<\/row>/g)) {
+      const cells = [];
+      for (const c of r[1].matchAll(/<cell[^>]*>([\s\S]*?)<\/cell>/g)) {
+        const t = apiBibleStripTags(c[1]).replace(/\s+/g, ' ').trim();
+        if (t) cells.push(t);
+      }
+      if (cells.length) rows.push(cells.join(' — '));
+    }
+    return '\n' + rows.join('\n') + '\n';
+  });
+  // Heading paragraphs go entirely;  every other paragraph ends a line.
+  s = s.replace(/<p\b([^>]*)>([\s\S]*?)<\/p>/g, (_m, attrs, body) => {
+    const cls = /class="([^"]*)"/.exec(attrs);
+    if (cls && API_BIBLE_HEADING_CLASS.test(cls[1].trim())) return '\n';
+    return body + '\n';
+  });
+  s = apiBibleDecode(apiBibleStripTags(s));
+  return s
+    .split('\n')
+    .map((l) => l.replace(/[ \t\u00a0]+/g, ' ').trim())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 // ---- Psalm 119: the acrostic letters ----
 //
 // Psalm 119 is twenty-two stanzas of eight verses, each headed by a Hebrew
@@ -2405,7 +2467,10 @@ function liftAcrosticHeadings(content) {
 
 function sanitizeApiBibleContent(data, translationId, bookNum, chapter) {
   if (!data || typeof data.content !== 'string') return data;
-  let cleaned = data.content.replace(API_BIBLE_REGEX_ARTIFACT, '');
+  // A v2 entry holds HTML;  a v1 entry (until its TTL runs out) holds text.
+  // Both leave here as text.
+  let cleaned = /<(p|span|table)\b/.test(data.content) ? apiBibleHtmlToText(data.content) : data.content;
+  cleaned = cleaned.replace(API_BIBLE_REGEX_ARTIFACT, '');
   // KLB only — the other api.bible translations do not carry inline titles,
   // and the heading table is keyed to this Bible's versification.
   if (translationId === KLB_TRANSLATION_ID) {
@@ -2473,7 +2538,10 @@ async function handleApiBibleChapter(env, url, cors, translationId, bookNum, cha
 
   const usfmCode = USFM_CODES[bookIdx];
   const chapterId = `${usfmCode}.${chapter}`;
-  const cacheKey = `apibible_raw_${translationId}_${chapterId}`;
+  // v2: the stored payload is api.bible's HTML, converted to text on the way
+  // out — see apiBibleHtmlToText.  v1 keys held plain text and expire on
+  // their own 30-day TTL.
+  const cacheKey = `apibible_raw_v2_${translationId}_${chapterId}`;
 
   // no-store on the response so browsers and edge don't keep their own copies.
   // Our KV is the canonical cache, and a stale entry in the browser would prevent
@@ -2485,25 +2553,6 @@ async function handleApiBibleChapter(env, url, cors, translationId, bookNum, cha
   };
 
   // Try KV cache first
-  // TEMPORARY probe, to see what api.bible's other content types carry for a
-  // chapter (tables in 1 Chronicles 27, poetry lines) before the fetch below
-  // is switched to one of them.  Bypasses the cache, stores nothing, returns
-  // the raw payload.  Removed once the HTML path is built.
-  const probe = url.searchParams.get('probe');
-  if (probe === 'html' || probe === 'json') {
-    const pp = new URLSearchParams({
-      'content-type': probe,
-      'include-notes': 'false',
-      'include-titles': 'false',
-      'include-chapter-numbers': 'false',
-      'include-verse-numbers': 'true',
-      'include-verse-spans': 'false'
-    });
-    const r = await fetch(`https://rest.api.bible/v1/bibles/${translationId}/chapters/${chapterId}?${pp}`,
-      { headers: { 'api-key': env.API_BIBLE_KEY } });
-    return new Response(await r.text(), { status: r.status, headers: { ...respHeaders, 'Cache-Control': 'no-store' } });
-  }
-
   if (env.COMMENTARY_KV) {
     const cached = await env.COMMENTARY_KV.get(cacheKey, 'json');
     if (cached) {
@@ -2522,7 +2571,12 @@ async function handleApiBibleChapter(env, url, cors, translationId, bookNum, cha
   // NOTE: do NOT include `use-org-id` here — that param belongs to the verses
   // endpoint and api.bible 400s on it for chapters.
   const params = new URLSearchParams({
-    'content-type': 'text',
+    // HTML, not text: text runs a table's cells together with nothing between
+    // them (1 Chronicles 27:16 read "Tribe LeaderReuben Eliezer son of
+    // ZicriSimeon ...").  HTML keeps rows, cells, poetry lines and the
+    // acrostic headings as markup, and apiBibleHtmlToText turns that into the
+    // [N]-marked text the clients have always parsed.
+    'content-type': 'html',
     'include-notes': 'false',
     'include-titles': 'false',
     'include-chapter-numbers': 'false',
@@ -2731,7 +2785,12 @@ async function getApiBibleSearchIndex(env, translationId) {
 async function fetchChapterFromApiBible(translationId, usfmCode, chapter, env) {
   const chapterId = `${usfmCode}.${chapter}`;
   const params = new URLSearchParams({
-    'content-type': 'text',
+    // HTML, not text: text runs a table's cells together with nothing between
+    // them (1 Chronicles 27:16 read "Tribe LeaderReuben Eliezer son of
+    // ZicriSimeon ...").  HTML keeps rows, cells, poetry lines and the
+    // acrostic headings as markup, and apiBibleHtmlToText turns that into the
+    // [N]-marked text the clients have always parsed.
+    'content-type': 'html',
     'include-notes': 'false',
     'include-titles': 'false',
     'include-chapter-numbers': 'false',
@@ -2795,7 +2854,7 @@ async function handleBuildApiBibleIndex(env, url, cors) {
       const [bookIdx, chapter] = ordinalToBookChapter(ord);
       const usfm = USFM_CODES[bookIdx];
       const chapterId = `${usfm}.${chapter}`;
-      const cacheKey = `apibible_raw_${translationId}_${chapterId}`;
+      const cacheKey = `apibible_raw_v2_${translationId}_${chapterId}`;
       try {
         let chapterPayload = null;
         if (!refetch && env.COMMENTARY_KV) {
@@ -2811,7 +2870,9 @@ async function handleBuildApiBibleIndex(env, url, cors) {
           }
           fetched++;
         }
-        const verses = parseApiBibleChapterContent(chapterPayload.data.content);
+        const verses = parseApiBibleChapterContent(
+          sanitizeApiBibleContent(chapterPayload.data, translationId, bookIdx + 1, chapter).content,
+        );
         return verses.map(v => [bookIdx, chapter, v.verse, v.text]);
       } catch (e) {
         errored++;
