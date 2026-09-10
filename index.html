@@ -10070,6 +10070,10 @@ async function fbMergeNotes(uid){
       endVerse:typeof data.endVerse==='number'?data.endVerse:null,
       text:typeof data.text==='string'?data.text:'',
       ts:typeof data._updatedAt==='number'?data._updatedAt:0,
+      // The "edited" time as shown, which the app keeps separate from the
+      // sync clock so an undone edit does not read as an edit.  Absent from
+      // older docs and from this site's own writes, where the clock stands in.
+      editedAt:typeof data.editedAt==='number'?data.editedAt:null,
       deleted:data.deleted===true
     };
   });
@@ -10082,7 +10086,7 @@ async function fbMergeNotes(uid){
     var lHas=id in localNotes;
     if(r && r.ts > lTs){
       if(!r.deleted && r.bookIdx!==null && r.chapter!==null && r.startVerse!==null){
-        nextNotes[id]={bookIdx:r.bookIdx,chapter:r.chapter,startVerse:r.startVerse,endVerse:r.endVerse!==null?r.endVerse:r.startVerse,text:r.text,_updatedAt:r.ts};
+        nextNotes[id]={bookIdx:r.bookIdx,chapter:r.chapter,startVerse:r.startVerse,endVerse:r.endVerse!==null?r.endVerse:r.startVerse,text:r.text,_updatedAt:r.editedAt!==null?r.editedAt:r.ts};
       }
       nextTs[id]=r.ts;
     } else if(lTs > (r?r.ts:0) || !r){
