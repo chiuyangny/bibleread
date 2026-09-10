@@ -4094,6 +4094,39 @@ async function votdSendPreviewEmail(dateET, photo, env) {
   }).catch(() => {});  // mail failing must never take the cron down with it
 }
 
+// ---- Photo filters ----
+//
+// Unsplash serves through imgix, so a filter is nothing but URL parameters
+// on the photo's own URL: the picker previews exactly the bytes the app will
+// load, and the app needs no code for it at all.  A filtered record keeps
+// its slug (the photo's identity, for the used and blocked lists) and gains
+// `filter`, so the choice is visible and can be changed.
+const VOTD_FILTERS = {
+  original: '',
+  vivid: 'sat=30&con=8',
+  warm: 'sepia=30',
+  muted: 'sat=-35&con=-8&bri=4',
+  mono: 'sat=-100',
+  dark: 'bri=-18&con=6',
+};
+const VOTD_FILTER_PARAMS = /[?&](sat|con|bri|sepia|exp|hue|vib)=[^&]*/g;
+
+/** The photo's URL with `name` applied and any earlier filter removed. */
+function votdFilterUrl(url, name) {
+  const params = VOTD_FILTERS[name];
+  if (params == null) return url;
+  const clean = String(url).replace(VOTD_FILTER_PARAMS, (m) => (m[0] === '?' ? '?' : ''))
+    .replace(/\?&/, '?').replace(/[?&]$/, '');
+  if (!params) return clean;
+  return clean + (clean.includes('?') ? '&' : '?') + params;
+}
+
+/** A record with the filter applied to its URL and named on it. */
+function votdWithFilter(rec, name) {
+  if (!rec || !VOTD_FILTERS.hasOwnProperty(name)) return rec;
+  return { ...rec, url: votdFilterUrl(rec.url, name), filter: name };
+}
+
 /**
  * Choose and store the photo for an ET date.  Writing `votdphoto2_<date>`
  * ahead of time is the whole mechanism: when that date arrives, /votd sees a
@@ -4836,9 +4869,19 @@ Only output valid JSON, no markdown, no preamble.`;
           const queue = await votdReadJson(env, 'votd_queue', []);
           const used = await votdReadJson(env, 'votd_used', {});
           if (!queue.some((q) => q.slug === slug) && !used[slug]) {
-            queue.push({ ...rec, source: 'picker', addedAt: new Date().toISOString() });
+            // The filter chosen on the board rides in with the photo — see
+            // VOTD_FILTERS.  Unknown or absent means the original.
+            const filtered = votdWithFilter(rec, url.searchParams.get('filter') || 'original');
+            queue.push({ ...filtered, source: 'picker', addedAt: new Date().toISOString() });
             await votdWriteJson(env, 'votd_queue', queue);
           }
+        } else if (action === 'refilter') {
+          // Change a QUEUED photo's filter in place.  Resolves against the
+          // queue, like unqueue, since that is where the photo is.
+          const name = url.searchParams.get('filter') || 'original';
+          if (!VOTD_FILTERS.hasOwnProperty(name)) return json({ error: 'bad filter' }, 400);
+          const queue = await votdReadJson(env, 'votd_queue', []);
+          await votdWriteJson(env, 'votd_queue', queue.map((q) => (q.slug === slug ? votdWithFilter(q, name) : q)));
         } else if (action === 'unqueue') {
           // Undo, for a mis-tap.  Removing from the queue does NOT block the
           // photo — it simply goes back to being suggestible.
@@ -5094,6 +5137,32 @@ Only output valid JSON, no markdown, no preamble.`;
         // stale edge cache, or an approved photo could be reported wrongly.
         headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
       });
+    }
+
+    // ---- /admin/votd-filter — change the filter on a STAGED photo ----
+    // ?date=YYYY-MM-DD&filter=name.  Rewrites votdphoto2_<date> with the
+    // filter applied to the same photo, so the live tile and tomorrow's can
+    // be adjusted without re-rolling.  Same date guard as /admin/votd-next.
+    if (path === '/admin/votd-filter') {
+      const secret = request.headers.get('X-Admin-Secret') || url.searchParams.get('secret');
+      const json = (obj, status = 200) => new Response(JSON.stringify(obj), {
+        status, headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
+      });
+      if (!env.ADMIN_SECRET || secret !== env.ADMIN_SECRET) return json({ error: 'forbidden' }, 403);
+      const date = url.searchParams.get('date') || votdDateET(1);
+      const name = url.searchParams.get('filter') || 'original';
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return json({ error: 'bad date' }, 400);
+      if (date < votdDateET(-2)) return json({ error: 'date already past' }, 400);
+      if (!VOTD_FILTERS.hasOwnProperty(name)) return json({ error: 'bad filter' }, 400);
+      if (!env.COMMENTARY_KV) return json({ error: 'kv_unset' }, 503);
+      const raw = await env.COMMENTARY_KV.get(`votdphoto2_${date}`);
+      if (!raw) return json({ error: 'nothing staged' }, 404);
+      let photo = null;
+      try { photo = JSON.parse(raw); } catch { photo = null; }
+      if (!photo || !photo.url) return json({ error: 'nothing staged' }, 404);
+      photo = votdWithFilter(photo, name);
+      await env.COMMENTARY_KV.put(`votdphoto2_${date}`, JSON.stringify(photo), { expirationTtl: votdKeyTtl(date) });
+      return json({ date, photo });
     }
 
     // ---- /admin/votd-next — re-roll the staged photo for a date ----
